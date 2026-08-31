@@ -202,8 +202,12 @@ export function findScopeBlocks(text: string): ScopeBlock[] {
   // scope "/p", Mod do | scope "/p" do | scope Mod do | scope("/p", Mod) do
   // | scope path: "/p", alias: Mod do   (+ trailing opts such as host:/assigns:,
   // which may push the `do` onto a following line).
+  //
+  // `scope:` as a keyword-list KEY is not a scope block —
+  // `use Kaffy.Routes, scope: "/admin"` would otherwise reach forward to the
+  // next unrelated `do` and swallow whatever declarations sit in between.
   const re = new RegExp(
-    String.raw`\bscope\b\s*\(?\s*(?:path:\s*)?(?:${STR(1)})?\s*,?\s*(?:alias:\s*)?(${MOD})?[\s\S]{0,400}?\bdo\b(?!:)`,
+    String.raw`\bscope\b(?!:)\s*\(?\s*(?:path:\s*)?(?:${STR(1)})?\s*,?\s*(?:alias:\s*)?(${MOD})?[\s\S]{0,400}?\bdo\b(?!:)`,
     'g'
   );
   let m: RegExpExecArray | null;

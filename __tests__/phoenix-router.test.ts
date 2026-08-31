@@ -440,6 +440,26 @@ describe('phoenixResolver.extract — scopes and pipelines', () => {
     expect(nodes.filter((n) => n.kind === 'route').map((n) => n.name)).toEqual(['GET /']);
   });
 
+  it('does not treat a `scope:` keyword option as a scope block', () => {
+    // `use Kaffy.Routes, scope: "/admin"` used to reach forward to the next
+    // unrelated `do` and swallow the pipeline declared in between.
+    const { nodes } = extract(
+      router(
+        [
+          '  use Kaffy.Routes, scope: "/admin", pipe_through: [:monitoring]',
+          '',
+          '  pipeline :browser do',
+          '    plug(:accepts, ["html"])',
+          '  end',
+          '',
+          '  get "/", DefaultController, :index',
+        ].join('\n')
+      )
+    );
+    expect(nodes.find((n) => n.kind === 'component')?.name).toBe(':browser');
+    expect(nodes.filter((n) => n.kind === 'route').map((n) => n.name)).toEqual(['GET /']);
+  });
+
   it('emits a pipeline node so pipe_through has a target', () => {
     const { nodes } = extract(
       router(['  pipeline :api do', '    plug :accepts, ["json"]', '  end'].join('\n'))
