@@ -1336,3 +1336,175 @@ describe('Terraform follow-ups: remote-state bridge, provider alias, moved block
     }
   });
 });
+
+describe('Phoenix end-to-end — route→handler resolution in an umbrella app', () => {
+  let tmpDir: string | undefined;
+  afterEach(() => {
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    tmpDir = undefined;
+  });
+
+  it('indexes an umbrella Phoenix project and links routes to controller actions', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-phoenix-'));
+    const write = (rel: string, body: string) => {
+      const full = path.join(tmpDir!, rel);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, body);
+    };
+
+    // Umbrella root: no deps of its own — phoenix is declared by the child app.
+    write(
+      'mix.exs',
+      'defmodule MyApp.Umbrella.MixProject do\n' +
+        '  use Mix.Project\n' +
+        '  def project, do: [apps_path: "apps"]\n' +
+        'end\n'
+    );
+    write(
+      'apps/my_app_web/mix.exs',
+      'defmodule MyAppWeb.MixProject do\n' +
+        '  use Mix.Project\n' +
+        '  defp deps do\n' +
+        '    [{:phoenix, "~> 1.7"}, {:phoenix_live_view, "~> 1.0"}]\n' +
+        '  end\n' +
+        'end\n'
+    );
+
+    // Router: parenthesised macros, an `alias` shorthand, a scope with a
+    // module prefix, resources with only:, a live route and a pipeline.
+    write(
+      'apps/my_app_web/lib/my_app_web/router.ex',
+      'defmodule MyAppWeb.Router do\n' +
+        '  use MyAppWeb, :router\n' +
+        '\n' +
+        '  alias MyAppWeb.StatusController\n' +
+        '\n' +
+        '  pipeline :api do\n' +
+        '    plug(:accepts, ["json"])\n' +
+        '  end\n' +
+        '\n' +
+        '  scope "/api", MyAppWeb do\n' +
+        '    pipe_through(:api)\n' +
+        '\n' +
+        '    get("/users", UserController, :index)\n' +
+        '    resources("/posts", PostController, only: [:index, :show])\n' +
+        '    live("/dashboard", DashboardLive)\n' +
+        '  end\n' +
+        '\n' +
+        '  get("/service-status", StatusController, :index)\n' +
+        'end\n'
+    );
+
+    write(
+      'apps/my_app_web/lib/my_app_web/controllers/user_controller.ex',
+      'defmodule MyAppWeb.UserController do\n' +
+        '  use MyAppWeb, :controller\n' +
+        '\n' +
+        '  def index(conn, _params) do\n' +
+        '    conn\n' +
+        '  end\n' +
+        'end\n'
+    );
+    write(
+      'apps/my_app_web/lib/my_app_web/controllers/post_controller.ex',
+      'defmodule MyAppWeb.PostController do\n' +
+        '  use MyAppWeb, :controller\n' +
+        '\n' +
+        '  def index(conn, _params), do: conn\n' +
+        '  def show(conn, %{"id" => _id}), do: conn\n' +
+        'end\n'
+    );
+    write(
+      'apps/my_app_web/lib/my_app_web/controllers/status_controller.ex',
+      'defmodule MyAppWeb.StatusController do\n' +
+        '  use MyAppWeb, :controller\n' +
+        '\n' +
+        '  def index(conn, _params), do: conn\n' +
+        'end\n'
+    );
+    write(
+      'apps/my_app_web/lib/my_app_web/live/dashboard_live.ex',
+      'defmodule MyAppWeb.DashboardLive do\n' +
+        '  use MyAppWeb, :live_view\n' +
+        '\n' +
+        '  def mount(_params, _session, socket) do\n' +
+        '    {:ok, socket}\n' +
+        '  end\n' +
+        'end\n'
+    );
+
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+
+      expect(cg.getDetectedFrameworks()).toContain('phoenix');
+
+      const routes = cg.getNodesByKind('route');
+      const routeNames = routes.map((n) => n.name).sort();
+      expect(routeNames).toEqual([
+        'GET /api/dashboard',
+        'GET /api/posts',
+        'GET /api/posts/:id',
+        'GET /api/users',
+        'GET /service-status',
+        'POST /api/dashboard',
+      ]);
+
+      const routerFile = 'apps/my_app_web/lib/my_app_web/router.ex';
+      const edgeTo = (routeName: string, targetId: string) =>
+        cg
+          .getOutgoingEdges(routes.find((n) => n.name === routeName)!.id)
+          .find((e) => e.target === targetId);
+
+      const actionNode = (file: string, name: string) =>
+        cg.getNodesInFile(file).find((n) => n.kind === 'function' && n.name === name)!;
+
+      // 1. Scope-prefixed controller → action.
+      const userIndex = actionNode(
+        'apps/my_app_web/lib/my_app_web/controllers/user_controller.ex',
+        'index'
+      );
+      expect(userIndex, 'UserController.index node').toBeDefined();
+      const userEdge = edgeTo('GET /api/users', userIndex.id);
+      expect(userEdge, 'GET /api/users → UserController.index').toBeDefined();
+      expect(userEdge!.kind).toBe('references');
+
+      // 2. resources only: [...] → both expanded actions.
+      const postFile = 'apps/my_app_web/lib/my_app_web/controllers/post_controller.ex';
+      expect(edgeTo('GET /api/posts', actionNode(postFile, 'index').id)).toBeDefined();
+      expect(edgeTo('GET /api/posts/:id', actionNode(postFile, 'show').id)).toBeDefined();
+
+      // 3. `alias`-shorthand controller outside any scope.
+      const statusIndex = actionNode(
+        'apps/my_app_web/lib/my_app_web/controllers/status_controller.ex',
+        'index'
+      );
+      expect(
+        edgeTo('GET /service-status', statusIndex.id),
+        'GET /service-status → StatusController.index (via alias)'
+      ).toBeDefined();
+
+      // 4. live route → the LiveView MODULE (no #action).
+      const liveModule = cg
+        .getNodesInFile('apps/my_app_web/lib/my_app_web/live/dashboard_live.ex')
+        .find((n) => n.kind === 'namespace' && n.name === 'MyAppWeb.DashboardLive')!;
+      expect(liveModule, 'DashboardLive namespace node').toBeDefined();
+      expect(edgeTo('GET /api/dashboard', liveModule.id)).toBeDefined();
+      expect(edgeTo('POST /api/dashboard', liveModule.id)).toBeDefined();
+
+      // 5. pipeline node exists and pipe_through points at it.
+      const pipeline = cg
+        .getNodesInFile(routerFile)
+        .find((n) => n.kind === 'component' && n.name === ':api')!;
+      expect(pipeline, 'pipeline :api node').toBeDefined();
+      expect(
+        edgeTo('GET /api/users', pipeline.id),
+        'GET /api/users → pipeline :api (pipe_through)'
+      ).toBeDefined();
+      // A route outside the scope must NOT inherit the pipeline.
+      expect(edgeTo('GET /service-status', pipeline.id)).toBeUndefined();
+    } finally {
+      cg.close();
+    }
+  });
+});
