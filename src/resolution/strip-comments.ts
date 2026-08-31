@@ -36,7 +36,8 @@ export type CommentLang =
   | 'rust'
   | 'c'
   | 'cpp'
-  | 'erlang';
+  | 'erlang'
+  | 'elixir';
 
 export function stripCommentsForRegex(content: string, lang: CommentLang): string {
   switch (lang) {
@@ -48,6 +49,8 @@ export function stripCommentsForRegex(content: string, lang: CommentLang): strin
       return stripRust(content);
     case 'erlang':
       return stripErlang(content);
+    case 'elixir':
+      return stripElixir(content);
     case 'php':
       return stripPhp(content);
     case 'go':
@@ -466,6 +469,80 @@ function stripRust(src: string): string {
         i++;
       }
       if (i < n && src[i] === "'") i++;
+      continue;
+    }
+
+    i++;
+  }
+
+  return out.join('');
+}
+
+// ---------- Elixir ----------
+
+/**
+ * Elixir: `#` line comments and triple-quoted heredocs (which hold @moduledoc
+ * prose full of routing-shaped examples). Single-line strings stay intact — a
+ * Phoenix route's path IS a string literal, and a `#` inside one is
+ * interpolation (`#{}`), not a comment. `?#` / `?"` character literals are
+ * stepped over so they can't open a phantom string or comment.
+ */
+function stripElixir(src: string): string {
+  const out = src.split('');
+  let i = 0;
+  const n = src.length;
+
+  while (i < n) {
+    const c = src[i]!;
+    const c2 = src[i + 1] ?? '';
+
+    // Character literal: ?a ?" ?# ?\n
+    if (c === '?' && c2 !== '' && !/\s/.test(c2)) {
+      i += c2 === '\\' ? 3 : 2;
+      continue;
+    }
+
+    // Heredoc opener (three identical quotes).
+    if ((c === '"' || c === "'") && c2 === c && src[i + 2] === c) {
+      const quote = c;
+      const start = i;
+      i += 3;
+      while (i < n) {
+        if (src[i] === '\\' && i + 1 < n) {
+          i += 2;
+          continue;
+        }
+        if (src[i] === quote && src[i + 1] === quote && src[i + 2] === quote) {
+          i += 3;
+          break;
+        }
+        i++;
+      }
+      blankRange(out, start, i, src);
+      continue;
+    }
+
+    // Single-line string / charlist — left intact, only skipped over.
+    if (c === '"' || c === "'") {
+      const quote = c;
+      i++;
+      while (i < n && src[i] !== quote) {
+        if (src[i] === '\\' && i + 1 < n) {
+          i += 2;
+          continue;
+        }
+        if (src[i] === '\n') break;
+        i++;
+      }
+      if (i < n && src[i] === quote) i++;
+      continue;
+    }
+
+    // Line comment
+    if (c === '#') {
+      const start = i;
+      while (i < n && src[i] !== '\n') i++;
+      blankRange(out, start, i, src);
       continue;
     }
 
